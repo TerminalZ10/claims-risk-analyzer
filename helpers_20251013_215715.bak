@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import IsolationForest
+
+NUMERIC_CANDIDATES = [
+    "claim_amount", "policy_premium", "annual_income", "age", "tenure_months"
+]
+
+CATEGORICAL_CANDIDATES = [
+    "region", "state", "policy_type", "claim_type", "incident_severity",
+    "vehicle_segment", "marital_status", "customer_education"
+]
+
+def coalesce_columns(df: pd.DataFrame):
+    # Normalize column names
+    df = df.copy()
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+    # Friendly aliases (map common variants to a standard set)
+    alias_map = {
+        "total_claim_amount": "claim_amount",
+        "total_claim_value": "claim_amount",
+        "claim_value": "claim_amount",
+        "amount": "claim_amount",
+
+        "premium": "policy_premium",
+        "policy_annual_premium": "policy_premium",
+
+        "education": "customer_education",
+        "education_level": "customer_education",
+
+        "state_code": "state",
+
+        "customer_lifetime_value": "lifetime_value",
+        "customer_value": "lifetime_value",
+
+        "months_since_policy_inception": "tenure_months",
+        "policy_tenure": "tenure_months"
+    }
+    for old, new in alias_map.items():
+        if old in df.columns and new not in df.columns:
+            df.rename(columns={old: new}, inplace=True)
+
+    return df
+
+def compute_kpis(df: pd.DataFrame):
+    kpis = {}
+    if "claim_amount" in df.columns:
+        kpis["total_claims_amount"] = float(df["claim_amount"].fillna(0).sum())
+        kpis["avg_claim_amount"] = float(df["claim_amount"].dropna().mean())
+    kpis["num_claims"] = int(len(df))
+    if "policy_premium" in df.columns and "claim_amount" in df.columns:
+        # crude proxy for loss ratio if premium exists
+        premiums = df["policy_premium"].fillna(0).sum()
+        claims = df["claim_amount"].fillna(0).sum()
+        kpis["loss_ratio_proxy"] = float(claims / premiums) if premiums > 0 else None
+    return kpis
+
+def isolation_forest_scores(df: pd.DataFrame, random_state=42):
+    # Build a simple numeric feature matrix
+    num_cols = [c for c in NUMERIC_CANDIDATES if c in df.columns]
+    if not num_cols:
+        return pd.Series([0.0] * len(df), index=df.index)
+    X = df[num_cols].fillna(0.0).astype(float).values
+    model = IsolationForest(n_estimators=200, contamination="auto", random_state=random_state)
+    scores = -model.fit_predict(X)  # 1 for normal, -1 for anomaly; invert to score-like
+    # decision_function gives anomaly scores; lower = more abnormal
+    decision = model.decision_function(X)
+    # Normalize to 0..1 (higher = more anomalous)
+    dec_min, dec_max = decision.min(), decision.max()
+    if dec_max == dec_min:
+        norm = np.zeros_like(decision)
+    else:
+        norm = (dec_max - decision) / (dec_max - dec_min)
+    return pd.Series(norm, index=df.index)
+
+def category_amount_zscores(df: pd.DataFrame, category_col: str, amount_col="claim_amount"):
+    if amount_col not in df.columns or category_col not in df.columns:
+        return pd.Series([np.nan]*len(df), index=df.index)
+    def zscore(s):
+        m = s.mean()
+        sd = s.std(ddof=0)
+        if sd == 0 or np.isnan(sd):
+            return (s - m) * 0.0
+        return (s - m) / sd
+    z = df.groupby(category_col)[amount_col].transform(zscore)
+    return z
+
+def flag_anomalies(df: pd.DataFrame, iforest_weight=0.6, zscore_weight=0.4, z_threshold=2.5, score_threshold=0.65):
+    out = df.copy()
+    out["anomaly_iforest"] = isolation_forest_scores(out).fillna(0.0)
+
+    # Try a couple of categorical pivots if present
+    zcomponents = []
+    for cat in ["claim_type", "policy_type", "state", "region"]:
+        if cat in out.columns:
+            z = category_amount_zscores(out, cat)
+            zcomponents.append(z.abs())
+    if zcomponents:
+        out["anomaly_z"] = pd.concat(zcomponents, axis=1).mean(axis=1)
+    else:
+        out["anomaly_z"] = 0.0
+
+    # Combine signals
+    out["risk_score"] = (iforest_weight * out["anomaly_iforest"].fillna(0.0) +
+                         zscore_weight * (out["anomaly_z"].fillna(0.0) / max(out["anomaly_z"].max(), 1.0)))
+
+    # Reason codes
+    reasons = []
+    for _, row in out.iterrows():
+        r = []
+        if row.get("anomaly_iforest", 0) >= score_threshold:
+            r.append("IsolationForest outlier")
+        if row.get("anomaly_z", 0) >= z_threshold:
+            r.append("Category z-score high")
+        reasons.append(", ".join(r) if r else "—")
+    out["risk_reason"] = reasons
+
+    # Flag
+    out["flagged"] = (out["anomaly_iforest"] >= score_threshold) | (out["anomaly_z"] >= z_threshold)
+    return out
+
+def safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
