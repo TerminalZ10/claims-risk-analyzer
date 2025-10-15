@@ -53,14 +53,22 @@ def load_sample_df():
     df.loc[np.random.choice(df.index, 2, replace=False), "claim_amount"] *= 6
     return df
 
+# Use session state to persist data across reruns
+if 'df' not in st.session_state:
+    st.session_state.df = None
+
 df = None
 if uploaded is not None:
     try:
         df = pd.read_csv(uploaded)
+        st.session_state.df = df  # Store in session state
     except Exception as e:
         st.error(f"Failed to read CSV: {e}")
 elif sample_btn:
     df = load_sample_df()
+    st.session_state.df = df  # Store in session state
+elif st.session_state.df is not None:
+    df = st.session_state.df  # Retrieve from session state
 
 if df is not None:
     df = coalesce_columns(df)
@@ -156,7 +164,7 @@ if df is not None:
             duplicates_method = st.radio(
                 "Duplicate handling method",
                 options=["Flag only", "Exclude rows", "Ignore"],
-                index=0,
+                index=1,
                 help="Flag only: highlight in table | Exclude: remove from analysis | Ignore: no duplicate detection"
             )
 
