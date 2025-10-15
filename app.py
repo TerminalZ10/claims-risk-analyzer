@@ -34,13 +34,27 @@ with st.expander("About this tool"):
 # Data input - prominent upload section
 st.subheader("📂 Upload CSV for Analysis (Claims/Policy Data)")
 
+# Initialize uploader key in session state
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
+
 # Add clear/reset button
 col_upload, col_reset = st.columns([4, 1])
 with col_upload:
-    uploaded = st.file_uploader("Choose a file to begin analysis", type=["csv"], label_visibility="collapsed")
+    uploaded = st.file_uploader(
+        "Choose a file to begin analysis",
+        type=["csv"],
+        label_visibility="collapsed",
+        key=f"uploader_{st.session_state.uploader_key}"
+    )
 with col_reset:
     if st.button("🔄 Clear Data"):
-        st.session_state.clear()
+        # Increment key to reset file uploader
+        st.session_state.uploader_key += 1
+        # Clear all other session state
+        for key in list(st.session_state.keys()):
+            if key != 'uploader_key':
+                del st.session_state[key]
         st.rerun()
 
 sample_btn = st.button("Use minimal sample data")
@@ -206,6 +220,12 @@ if df is not None:
     # Store original count for reporting
     original_row_count = len(df)
 
+    # Track which rows had quality issues BEFORE cleaning (for highlighting later)
+    original_age_issues = pd.Series(False, index=df.index)
+    if 'age' in df.columns:
+        age_series = pd.to_numeric(df['age'], errors='coerce')
+        original_age_issues = (age_series < age_min) | (age_series > age_max) | age_series.isna()
+
     # Clean AGE column
     df, affected_age, age_imputed_value = handle_numeric_outliers(
         df,
@@ -223,7 +243,12 @@ if df is not None:
     elif "salary" in df.columns:
         income_col = "salary"
 
+    # Track which rows had income issues BEFORE cleaning
+    original_income_issues = pd.Series(False, index=df.index)
     if income_col:
+        income_series = pd.to_numeric(df[income_col], errors='coerce')
+        original_income_issues = (income_series < income_min) | (income_series > income_max) | income_series.isna()
+
         df, affected_income, income_imputed_value = handle_numeric_outliers(
             df,
             column=income_col,
@@ -577,12 +602,13 @@ if df is not None:
 
         # Identify rows with data quality issues
         if highlight_toggle and not flagged.empty:
-            # Check age issues
+            # Use original issues tracked BEFORE cleaning
+            # This way imputed values still show as having had issues
             has_age_issue = pd.Series(False, index=flagged.index)
-            if 'age' in flagged.columns:
-                has_age_issue = (flagged['age'] < age_min) | (flagged['age'] > age_max) | flagged['age'].isna()
+            for idx in flagged.index:
+                if idx in original_age_issues.index:
+                    has_age_issue.loc[idx] = original_age_issues.loc[idx]
 
-            # Check income issues
             has_income_issue = pd.Series(False, index=flagged.index)
             income_col = None
             if 'annual_income' in flagged.columns:
@@ -591,7 +617,9 @@ if df is not None:
                 income_col = 'salary'
 
             if income_col:
-                has_income_issue = (flagged[income_col] < income_min) | (flagged[income_col] > income_max) | flagged[income_col].isna()
+                for idx in flagged.index:
+                    if idx in original_income_issues.index:
+                        has_income_issue.loc[idx] = original_income_issues.loc[idx]
 
             # Check for suspicious duplicates
             has_duplicate_issue = pd.Series(False, index=flagged.index)
