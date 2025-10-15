@@ -33,7 +33,16 @@ with st.expander("About this tool"):
 
 # Data input - prominent upload section
 st.subheader("📂 Upload CSV for Analysis (Claims/Policy Data)")
-uploaded = st.file_uploader("Choose a file to begin analysis", type=["csv"], label_visibility="collapsed")
+
+# Add clear/reset button
+col_upload, col_reset = st.columns([4, 1])
+with col_upload:
+    uploaded = st.file_uploader("Choose a file to begin analysis", type=["csv"], label_visibility="collapsed")
+with col_reset:
+    if st.button("🔄 Clear Data"):
+        st.session_state.clear()
+        st.rerun()
+
 sample_btn = st.button("Use minimal sample data")
 
 def load_sample_df():
